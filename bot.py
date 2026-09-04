@@ -114,6 +114,7 @@ RAW_PREFIXES = [
     "[MP]",
 ]
 
+# Sort by length descending for accurate string replacement
 SORTED_PREFIXES = sorted(RAW_PREFIXES, key=len, reverse=True)
 PATTERN = re.compile("|".join(re.escape(prefix) for prefix in SORTED_PREFIXES), re.IGNORECASE)
 
@@ -124,22 +125,13 @@ app = Client("caption_editor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=B
 
 
 def clean_text(text: str) -> str:
+    """Removes blacklisted words and excess spacing."""
     if not text:
         return ""
     cleaned = PATTERN.sub("", text)
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
     return cleaned.strip()
-
-
-def get_file_name(message: Message) -> str:
-    if message.document and message.document.file_name:
-        return clean_text(message.document.file_name)
-    elif message.video and message.video.file_name:
-        return clean_text(message.video.file_name)
-    elif message.audio and message.audio.file_name:
-        return clean_text(message.audio.file_name)
-    return ""
 
 
 # ----------------- COMMAND HANDLERS -----------------
@@ -151,7 +143,7 @@ async def start_handler(client: Client, message: Message):
 
     welcome_text = (
         "👋 **Welcome to Auto Caption Editor Bot!**\n\n"
-        "📤 **Step 1:** Forward or send your file(s) here (single file or multiple files up to 100+).\n"
+        "📤 **Step 1:** Forward or send your file(s) here (single file or 100+ files).\n"
         "⚡ All unwanted usernames, channels, and tags will be removed automatically.\n\n"
         "👉 When you finish sending all your files, click /done to set your custom caption."
     )
@@ -173,9 +165,9 @@ async def done_handler(client: Client, message: Message):
 
     prompt_text = (
         f"✅ **Received {file_count} file(s)!**\n\n"
-        "✍️ **Step 2:** Now send the message/links you want to add.\n"
+        "✍️ **Step 2:** Now send the message/links you want to append to the caption.\n"
         "The bot will combine:\n"
-        "`[File Name] + [Cleaned Caption] + [Your Message]`\n\n"
+        "`[Cleaned Caption] + [Your Message]`\n\n"
         "Reply with your text now, or send /cancel to abort."
     )
     await message.reply_text(prompt_text)
@@ -235,12 +227,11 @@ async def custom_text_processor(client: Client, message: Message):
     success_count = 0
     for idx, file_msg in enumerate(files_to_process, start=1):
         try:
-            filename = get_file_name(file_msg)
+            # Get original caption and remove unwanted tags/usernames
             original_caption = clean_text(file_msg.caption or "")
 
+            # Flow: Cleaned Caption + User Message (File name is NOT added here)
             caption_parts = []
-            if filename:
-                caption_parts.append(filename)
             if original_caption:
                 caption_parts.append(original_caption)
             if user_append_text:
@@ -248,6 +239,7 @@ async def custom_text_processor(client: Client, message: Message):
 
             final_caption = "\n\n".join(caption_parts)
 
+            # Instant zero-download server copy
             await file_msg.copy(
                 chat_id=message.chat.id,
                 caption=final_caption
@@ -282,7 +274,7 @@ async def main():
     ])
     logger.info("✅ Menu commands registered successfully.")
 
-    # Bot aagipokunda continuous ga wait chesela idle() pettadam jarigindi
+    # Keeps the process active so Render doesn't shut it down
     await idle()
     await app.stop()
 

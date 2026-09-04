@@ -1,7 +1,7 @@
 import os
 import re
 import logging
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, BotCommand
 
 # ----------------- LOGGING SETUP -----------------
@@ -114,19 +114,16 @@ RAW_PREFIXES = [
     "[MP]",
 ]
 
-# Sort by string length descending to avoid partial replacements
 SORTED_PREFIXES = sorted(RAW_PREFIXES, key=len, reverse=True)
 PATTERN = re.compile("|".join(re.escape(prefix) for prefix in SORTED_PREFIXES), re.IGNORECASE)
 
-# ----------------- SESSION STORAGE -----------------
-# Format: user_id -> {"state": "COLLECTING" | "WAITING_TEXT", "files": [Message]}
+# Session tracking: user_id -> {"state": "COLLECTING" | "WAITING_TEXT", "files": [Message]}
 user_sessions = {}
 
 app = Client("caption_editor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 
 def clean_text(text: str) -> str:
-    """Removes blacklisted words and cleans excess whitespace."""
     if not text:
         return ""
     cleaned = PATTERN.sub("", text)
@@ -136,7 +133,6 @@ def clean_text(text: str) -> str:
 
 
 def get_file_name(message: Message) -> str:
-    """Extracts the exact filename from document, video, or audio."""
     if message.document and message.document.file_name:
         return clean_text(message.document.file_name)
     elif message.video and message.video.file_name:
@@ -146,7 +142,7 @@ def get_file_name(message: Message) -> str:
     return ""
 
 
-# ----------------- BOT COMMANDS & MENU -----------------
+# ----------------- COMMAND HANDLERS -----------------
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
@@ -195,7 +191,7 @@ async def cancel_handler(client: Client, message: Message):
     await message.reply_text("🗑️ **Queue cleared.** Send /start whenever you want to begin again.")
 
 
-# ----------------- FILE RECEIVER -----------------
+# ----------------- FILE HANDLER -----------------
 @app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_collector(client: Client, message: Message):
     user_id = message.from_user.id
@@ -203,8 +199,6 @@ async def file_collector(client: Client, message: Message):
         user_sessions[user_id] = {"state": "COLLECTING", "files": []}
 
     session = user_sessions[user_id]
-
-    # If user sent files while previously waiting for text, reset state to collecting
     if session["state"] == "WAITING_TEXT":
         session["state"] = "COLLECTING"
 
@@ -221,7 +215,7 @@ async def file_collector(client: Client, message: Message):
         await message.reply_text(f"📥 **{total_files} files queued so far.** Click /done when ready.")
 
 
-# ----------------- TEXT RECEIVER & PROCESSOR -----------------
+# ----------------- TEXT HANDLER -----------------
 @app.on_message(filters.text & filters.private & ~filters.command(["start", "done", "cancel", "clear"]))
 async def custom_text_processor(client: Client, message: Message):
     user_id = message.from_user.id
@@ -244,7 +238,6 @@ async def custom_text_processor(client: Client, message: Message):
             filename = get_file_name(file_msg)
             original_caption = clean_text(file_msg.caption or "")
 
-            # Flow: File Name -> Cleaned Caption -> User Message
             caption_parts = []
             if filename:
                 caption_parts.append(filename)
@@ -255,7 +248,6 @@ async def custom_text_processor(client: Client, message: Message):
 
             final_caption = "\n\n".join(caption_parts)
 
-            # Direct server-to-server zero download copy
             await file_msg.copy(
                 chat_id=message.chat.id,
                 caption=final_caption
@@ -265,7 +257,6 @@ async def custom_text_processor(client: Client, message: Message):
         except Exception as e:
             logger.error(f"Error copying file #{idx} for user {user_id}: {e}")
 
-    # Clean up session memory
     del user_sessions[user_id]
 
     await status_msg.edit_text(
@@ -275,7 +266,7 @@ async def custom_text_processor(client: Client, message: Message):
     logger.info(f"Completed batch of {success_count} files for user {user_id}.")
 
 
-# ----------------- STARTUP & MENU CONFIGURATION -----------------
+# ----------------- STARTUP & KEEP-ALIVE -----------------
 async def main():
     await app.start()
     logger.info("==========================================")
@@ -283,7 +274,6 @@ async def main():
     logger.info("⚡ Zero-download instant forward mode active.")
     logger.info("==========================================")
 
-    # Automatically set Telegram 3-lines menu button commands
     await app.set_bot_commands([
         BotCommand("start", "Start the bot and send files"),
         BotCommand("done", "Done sending files & set your message"),
@@ -291,6 +281,10 @@ async def main():
         BotCommand("clear", "Clear queued files")
     ])
     logger.info("✅ Menu commands registered successfully.")
+
+    # Bot aagipokunda continuous ga wait chesela idle() pettadam jarigindi
+    await idle()
+    await app.stop()
 
 
 if __name__ == "__main__":

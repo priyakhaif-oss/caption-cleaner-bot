@@ -1,16 +1,22 @@
 import os
 import re
+import logging
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, BotCommand
 
+# ----------------- LOGGING SETUP -----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s - %(levelname)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ----------------- CONFIGURATION -----------------
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Default గా కింద యాడ్ అవ్వాల్సిన మెసేజ్
-user_custom_caption = "\n\n🔥 Join: @YourChannelName"
-
-# మీరు ఇచ్చిన అన్‌వాంటెడ్ పేర్ల లిస్ట్
+# ----------------- UNWANTED PREFIXES / USERNAMES -----------------
 RAW_PREFIXES = [
     "@VGCinemas_off",
     "www.1TamilBlasters.tel",
@@ -108,46 +114,184 @@ RAW_PREFIXES = [
     "[MP]",
 ]
 
-# పెద్ద పేర్లను ముందు రిమూవ్ చేసేలా సార్ట్ చేసి కంపైల్ చేయడం
+# Sort by string length descending to avoid partial replacements
 SORTED_PREFIXES = sorted(RAW_PREFIXES, key=len, reverse=True)
-PATTERN = re.compile("|".join(re.escape(p) for p in SORTED_PREFIXES), re.IGNORECASE)
+PATTERN = re.compile("|".join(re.escape(prefix) for prefix in SORTED_PREFIXES), re.IGNORECASE)
+
+# ----------------- SESSION STORAGE -----------------
+# Format: user_id -> {"state": "COLLECTING" | "WAITING_TEXT", "files": [Message]}
+user_sessions = {}
 
 app = Client("caption_editor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# 1. మీకు నచ్చినప్పుడు టెక్స్ట్‌ని మార్చుకోవడానికి కమాండ్
-@app.on_message(filters.command("setcaption") & filters.private)
-async def set_custom_caption(client: Client, message: Message):
-    global user_custom_caption
-    if len(message.command) < 2:
-        await message.reply_text("ఎలా వాడాలి:\n`/setcaption మీ మెసేజ్ లేదా లింక్స్ ఇక్కడ రాయండి`")
-        return
-    
-    # /setcaption తర్వాత మీరు ఇచ్చిన టెక్స్ట్ మొత్తాన్ని సేవ్ చేసుకుంటుంది
-    user_custom_caption = "\n\n" + message.text.split(None, 1)[1]
-    await message.reply_text("✅ మీ కస్టమ్ మెసేజ్ సేవ్ అయింది! ఇకపై వచ్చే ఫైల్స్‌కి కింద ఇదే యాడ్ అవుతుంది.")
 
-# 2. ఫైల్స్ వచ్చినప్పుడు ప్రాసెస్ చేసే భాగం
-@app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
-async def forward_with_cleaned_caption(client: Client, message: Message):
-    old_caption = message.caption or ""
-    
-    # లిస్ట్‌లో ఉన్న చెత్త పేర్లను తొలగిస్తుంది
-    cleaned_caption = PATTERN.sub("", old_caption)
-    
-    # ఖాళీ స్పేస్‌లు, లైన్లు క్లీన్ చేయడం
-    cleaned_caption = re.sub(r"[ \t]+", " ", cleaned_caption)
-    cleaned_caption = re.sub(r"\n\s*\n+", "\n\n", cleaned_caption).strip()
-    
-    # ఫ్లో: పాత క్యాప్షన్ + మీరు ఇచ్చిన మెసేజ్
-    if cleaned_caption:
-        final_caption = f"{cleaned_caption}{user_custom_caption}"
-    else:
-        final_caption = user_custom_caption.strip()
+def clean_text(text: str) -> str:
+    """Removes blacklisted words and cleans excess whitespace."""
+    if not text:
+        return ""
+    cleaned = PATTERN.sub("", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
+    return cleaned.strip()
 
-    # 0 Download: సర్వర్‌కి రాకుండా నేరుగా టెలిగ్రామ్ టు టెలిగ్రామ్ కాపీ
-    await message.copy(
-        chat_id=message.chat.id,
-        caption=final_caption
+
+def get_file_name(message: Message) -> str:
+    """Extracts the exact filename from document, video, or audio."""
+    if message.document and message.document.file_name:
+        return clean_text(message.document.file_name)
+    elif message.video and message.video.file_name:
+        return clean_text(message.video.file_name)
+    elif message.audio and message.audio.file_name:
+        return clean_text(message.audio.file_name)
+    return ""
+
+
+# ----------------- BOT COMMANDS & MENU -----------------
+@app.on_message(filters.command("start") & filters.private)
+async def start_handler(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_sessions[user_id] = {"state": "COLLECTING", "files": []}
+    logger.info(f"User {user_id} started the bot session.")
+
+    welcome_text = (
+        "👋 **Welcome to Auto Caption Editor Bot!**\n\n"
+        "📤 **Step 1:** Forward or send your file(s) here (single file or multiple files up to 100+).\n"
+        "⚡ All unwanted usernames, channels, and tags will be removed automatically.\n\n"
+        "👉 When you finish sending all your files, click /done to set your custom caption."
     )
+    await message.reply_text(welcome_text)
 
-app.run()
+
+@app.on_message(filters.command("done") & filters.private)
+async def done_handler(client: Client, message: Message):
+    user_id = message.from_user.id
+    session = user_sessions.get(user_id)
+
+    if not session or not session.get("files"):
+        await message.reply_text("⚠️ No files found in queue. Please send or forward your files first!")
+        return
+
+    session["state"] = "WAITING_TEXT"
+    file_count = len(session["files"])
+    logger.info(f"User {user_id} queued {file_count} files. Waiting for custom text input.")
+
+    prompt_text = (
+        f"✅ **Received {file_count} file(s)!**\n\n"
+        "✍️ **Step 2:** Now send the message/links you want to add.\n"
+        "The bot will combine:\n"
+        "`[File Name] + [Cleaned Caption] + [Your Message]`\n\n"
+        "Reply with your text now, or send /cancel to abort."
+    )
+    await message.reply_text(prompt_text)
+
+
+@app.on_message(filters.command("cancel") & filters.private)
+@app.on_message(filters.command("clear") & filters.private)
+async def cancel_handler(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+    logger.info(f"Session cleared for user {user_id}.")
+    await message.reply_text("🗑️ **Queue cleared.** Send /start whenever you want to begin again.")
+
+
+# ----------------- FILE RECEIVER -----------------
+@app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
+async def file_collector(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {"state": "COLLECTING", "files": []}
+
+    session = user_sessions[user_id]
+
+    # If user sent files while previously waiting for text, reset state to collecting
+    if session["state"] == "WAITING_TEXT":
+        session["state"] = "COLLECTING"
+
+    session["files"].append(message)
+    total_files = len(session["files"])
+    logger.info(f"User {user_id} added file #{total_files} to queue.")
+
+    if total_files == 1:
+        await message.reply_text(
+            "📥 **File added to queue!**\n"
+            "You can keep sending more files. Once finished, click /done."
+        )
+    elif total_files % 10 == 0:
+        await message.reply_text(f"📥 **{total_files} files queued so far.** Click /done when ready.")
+
+
+# ----------------- TEXT RECEIVER & PROCESSOR -----------------
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "done", "cancel", "clear"]))
+async def custom_text_processor(client: Client, message: Message):
+    user_id = message.from_user.id
+    session = user_sessions.get(user_id)
+
+    if not session or session.get("state") != "WAITING_TEXT":
+        await message.reply_text("ℹ️ Please send your files first, or type /start to restart.")
+        return
+
+    user_append_text = message.text.strip()
+    files_to_process = session.get("files", [])
+    total = len(files_to_process)
+
+    status_msg = await message.reply_text(f"⚡ **Processing {total} file(s)... Please wait.**")
+    logger.info(f"Processing {total} files for user {user_id}...")
+
+    success_count = 0
+    for idx, file_msg in enumerate(files_to_process, start=1):
+        try:
+            filename = get_file_name(file_msg)
+            original_caption = clean_text(file_msg.caption or "")
+
+            # Flow: File Name -> Cleaned Caption -> User Message
+            caption_parts = []
+            if filename:
+                caption_parts.append(filename)
+            if original_caption:
+                caption_parts.append(original_caption)
+            if user_append_text:
+                caption_parts.append(user_append_text)
+
+            final_caption = "\n\n".join(caption_parts)
+
+            # Direct server-to-server zero download copy
+            await file_msg.copy(
+                chat_id=message.chat.id,
+                caption=final_caption
+            )
+            success_count += 1
+
+        except Exception as e:
+            logger.error(f"Error copying file #{idx} for user {user_id}: {e}")
+
+    # Clean up session memory
+    del user_sessions[user_id]
+
+    await status_msg.edit_text(
+        f"🎉 **Done! Successfully processed and delivered {success_count}/{total} file(s).**\n\n"
+        "Send /start anytime to process another batch."
+    )
+    logger.info(f"Completed batch of {success_count} files for user {user_id}.")
+
+
+# ----------------- STARTUP & MENU CONFIGURATION -----------------
+async def main():
+    await app.start()
+    logger.info("==========================================")
+    logger.info("🤖 Auto Caption Editor Bot is ONLINE & RUNNING!")
+    logger.info("⚡ Zero-download instant forward mode active.")
+    logger.info("==========================================")
+
+    # Automatically set Telegram 3-lines menu button commands
+    await app.set_bot_commands([
+        BotCommand("start", "Start the bot and send files"),
+        BotCommand("done", "Done sending files & set your message"),
+        BotCommand("cancel", "Cancel current queue"),
+        BotCommand("clear", "Clear queued files")
+    ])
+    logger.info("✅ Menu commands registered successfully.")
+
+
+if __name__ == "__main__":
+    app.run(main())

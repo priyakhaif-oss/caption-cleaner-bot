@@ -136,7 +136,7 @@ active_prefixes = set(DEFAULT_PREFIXES)
 compiled_pattern = None
 
 def rebuild_pattern():
-    """Sorts and compiles regex safely."""
+    """Sorts and compiles regex safely with all dynamic prefixes."""
     global compiled_pattern
     sorted_list = sorted(list(active_prefixes), key=len, reverse=True)
     compiled_pattern = re.compile("|".join(re.escape(p) for p in sorted_list), re.IGNORECASE)
@@ -149,13 +149,26 @@ app = Client("caption_editor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=B
 
 
 def clean_text(text: str) -> str:
-    """Removes all prefixes and cleans excess whitespace."""
+    """Removes all dynamic/default prefixes from text or file name."""
     if not text:
         return ""
     cleaned = compiled_pattern.sub("", text)
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def get_cleaned_filename(message: Message) -> str:
+    """Extracts and strips all unwanted prefixes from the original file name."""
+    raw_name = ""
+    if message.document and message.document.file_name:
+        raw_name = message.document.file_name
+    elif message.video and message.video.file_name:
+        raw_name = message.video.file_name
+    elif message.audio and message.audio.file_name:
+        raw_name = message.audio.file_name
+
+    return clean_text(raw_name)
 
 
 # ----------------- COMMAND HANDLERS -----------------
@@ -168,7 +181,8 @@ async def start_handler(client: Client, message: Message):
     welcome_text = (
         "👋 Welcome to Auto Caption Editor Bot!\n\n"
         "📤 Step 1: Send or forward your file(s) here (1 or 100+ files).\n"
-        "⚡ All unwanted usernames, channels, and links will be removed automatically.\n\n"
+        "⚡ All unwanted usernames, channels, and prefixes (both default & added via /addprefix) "
+        "will be stripped from file names and captions automatically.\n\n"
         "👉 When finished sending all files, send /done to set your custom text.\n\n"
         "⚙️ Prefix Management:\n"
         "• /addprefix <prefixes> - Add new prefixes in bulk\n"
@@ -217,7 +231,6 @@ async def add_prefix_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("prefixes") & filters.private)
 async def list_prefixes_handler(client: Client, message: Message):
-    # ParseMode.DISABLED avoids ENTITY_BOUNDS_INVALID caused by markdown syntax collisions
     total = len(active_prefixes)
     await message.reply_text(
         f"📋 Total cleanable prefixes loaded: {total}\n\n"
@@ -242,7 +255,7 @@ async def done_handler(client: Client, message: Message):
     prompt_text = (
         f"✅ Received {file_count} file(s) in queue!\n\n"
         "✍️ Step 2: Now send the text/links you want to append to the caption.\n\n"
-        "Flow: [Cleaned Caption] + [Your Message]\n"
+        "Flow: [Cleaned File Name] + [Cleaned Caption] + [Your Message]\n"
         "Send your message now (or send /cancel to reset)."
     )
     await message.reply_text(prompt_text, parse_mode=ParseMode.DISABLED)
@@ -293,17 +306,23 @@ async def custom_text_processor(client: Client, message: Message):
     success_count = 0
     for idx, file_msg in enumerate(files_to_process, start=1):
         try:
+            # 1. Clean prefixes added via /addprefix from the file name
+            cleaned_filename = get_cleaned_filename(file_msg)
+
+            # 2. Clean prefixes added via /addprefix from the original caption
             original_caption = clean_text(file_msg.caption or "")
 
             caption_parts = []
-            if original_caption:
+            if cleaned_filename:
+                caption_parts.append(f"📁 {cleaned_filename}")
+            if original_caption and original_caption != cleaned_filename:
                 caption_parts.append(original_caption)
             if user_append_text:
                 caption_parts.append(user_append_text)
 
             final_caption = "\n\n".join(caption_parts)
 
-            # Direct server-to-server zero download copy
+            # Instant direct copy without downloading
             await file_msg.copy(
                 chat_id=message.chat.id,
                 caption=final_caption

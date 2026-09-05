@@ -5,6 +5,7 @@ from threading import Thread
 from flask import Flask
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, BotCommand
+from pyrogram.enums import ParseMode
 
 # ----------------- LOGGING SETUP -----------------
 logging.basicConfig(
@@ -131,19 +132,17 @@ DEFAULT_PREFIXES = [
     "[MP]",
 ]
 
-# Set to store default + dynamically added prefixes
 active_prefixes = set(DEFAULT_PREFIXES)
 compiled_pattern = None
 
 def rebuild_pattern():
-    """Sorts and re-compiles regex pattern with latest prefixes."""
+    """Sorts and compiles regex safely."""
     global compiled_pattern
     sorted_list = sorted(list(active_prefixes), key=len, reverse=True)
     compiled_pattern = re.compile("|".join(re.escape(p) for p in sorted_list), re.IGNORECASE)
 
 rebuild_pattern()
 
-# Session storage: user_id -> {"state": "COLLECTING" | "WAITING_TEXT", "files": [Message]}
 user_sessions = {}
 
 app = Client("caption_editor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -167,69 +166,63 @@ async def start_handler(client: Client, message: Message):
     logger.info(f"User {user_id} started session.")
 
     welcome_text = (
-        "👋 **Welcome to Auto Caption Editor Bot!**\n\n"
-        "📤 **Step 1:** Send or forward your file(s) here (1 or 100+ files).\n"
-        "⚡ All unwanted usernames, channels, and links will be stripped automatically.\n\n"
-        "👉 When finished sending all files, click /done to set your custom text.\n\n"
-        "⚙️ **Prefix Management:**\n"
-        "• `/addprefix <prefixes>` - Add new prefixes/links in bulk\n"
-        "• `/prefixes` - View recently added custom prefixes"
+        "👋 Welcome to Auto Caption Editor Bot!\n\n"
+        "📤 Step 1: Send or forward your file(s) here (1 or 100+ files).\n"
+        "⚡ All unwanted usernames, channels, and links will be removed automatically.\n\n"
+        "👉 When finished sending all files, send /done to set your custom text.\n\n"
+        "⚙️ Prefix Management:\n"
+        "• /addprefix <prefixes> - Add new prefixes in bulk\n"
+        "• /prefixes - Check count of clean prefixes"
     )
-    await message.reply_text(welcome_text)
+    await message.reply_text(welcome_text, parse_mode=ParseMode.DISABLED)
 
 
 @app.on_message(filters.command("addprefix") & filters.private)
 async def add_prefix_handler(client: Client, message: Message):
-    """Adds single or bulk prefixes to the active removal list."""
     if len(message.command) < 2 and not message.reply_to_message:
         usage_text = (
-            "ℹ️ **How to add prefixes in bulk:**\n\n"
-            "**Format 1 (Single/Line by line):**\n"
-            "`/addprefix @NewChannel @AnotherChannel`\n\n"
-            "**Format 2 (Multiline list):**\n"
-            "/addprefix\n"
-            "`@Channel1`\n"
-            "`@Channel2`\n"
-            "`www.newlink.com`"
+            "ℹ️ How to add prefixes:\n\n"
+            "Format 1:\n/addprefix @Channel1 @Channel2\n\n"
+            "Format 2 (Lines):\n/addprefix\n@Channel1\n@Channel2\nwww.example.com"
         )
-        await message.reply_text(usage_text)
+        await message.reply_text(usage_text, parse_mode=ParseMode.DISABLED)
         return
 
-    # Extract text after command
     raw_input = ""
     if len(message.command) >= 2:
         raw_input = message.text.split(None, 1)[1]
     elif message.reply_to_message and message.reply_to_message.text:
         raw_input = message.reply_to_message.text
 
-    # Split by newlines, tabs, or spaces to extract tokens cleanly
     new_items = [item.strip() for item in re.split(r"[\r\n\s]+", raw_input) if item.strip()]
 
     if not new_items:
-        await message.reply_text("⚠️ No valid prefixes detected.")
+        await message.reply_text("⚠️ No valid prefixes detected.", parse_mode=ParseMode.DISABLED)
         return
 
     for item in new_items:
         active_prefixes.add(item)
 
     rebuild_pattern()
-    logger.info(f"Added {len(new_items)} new prefix item(s). Total prefixes: {len(active_prefixes)}")
+    logger.info(f"Added {len(new_items)} new prefix(es). Total: {len(active_prefixes)}")
 
-    preview = "\n".join([f"• `{x}`" for x in new_items[:15]])
-    more_text = f"\n...and {len(new_items) - 15} more" if len(new_items) > 15 else ""
+    preview = "\n".join([f"• {x}" for x in new_items[:10]])
+    more_text = f"\n...and {len(new_items) - 10} more" if len(new_items) > 10 else ""
 
     await message.reply_text(
-        f"✅ **Successfully added {len(new_items)} prefix(es) to clean list!**\n\n"
-        f"{preview}{more_text}"
+        f"✅ Successfully added {len(new_items)} prefix(es) to clean list!\n\n{preview}{more_text}",
+        parse_mode=ParseMode.DISABLED
     )
 
 
 @app.on_message(filters.command("prefixes") & filters.private)
 async def list_prefixes_handler(client: Client, message: Message):
+    # ParseMode.DISABLED avoids ENTITY_BOUNDS_INVALID caused by markdown syntax collisions
     total = len(active_prefixes)
     await message.reply_text(
-        f"📋 **Total cleanable prefixes loaded:** `{total}`\n\n"
-        "You can add more anytime using `/addprefix <prefix1> <prefix2>`"
+        f"📋 Total cleanable prefixes loaded: {total}\n\n"
+        "You can add more anytime using /addprefix <prefix1> <prefix2>",
+        parse_mode=ParseMode.DISABLED
     )
 
 
@@ -239,7 +232,7 @@ async def done_handler(client: Client, message: Message):
     session = user_sessions.get(user_id)
 
     if not session or not session.get("files"):
-        await message.reply_text("⚠️ No files in queue! Please send or forward your files first.")
+        await message.reply_text("⚠️ No files in queue! Please send or forward your files first.", parse_mode=ParseMode.DISABLED)
         return
 
     session["state"] = "WAITING_TEXT"
@@ -247,12 +240,12 @@ async def done_handler(client: Client, message: Message):
     logger.info(f"User {user_id} queued {file_count} files.")
 
     prompt_text = (
-        f"✅ **Received {file_count} file(s)!**\n\n"
-        "✍️ **Step 2:** Send the text/links you want to append to the caption.\n\n"
-        "Flow: `[Cleaned Caption] + [Your Message]`\n"
-        "Send your message now (or type /cancel to reset)."
+        f"✅ Received {file_count} file(s) in queue!\n\n"
+        "✍️ Step 2: Now send the text/links you want to append to the caption.\n\n"
+        "Flow: [Cleaned Caption] + [Your Message]\n"
+        "Send your message now (or send /cancel to reset)."
     )
-    await message.reply_text(prompt_text)
+    await message.reply_text(prompt_text, parse_mode=ParseMode.DISABLED)
 
 
 @app.on_message(filters.command("cancel") & filters.private)
@@ -262,7 +255,7 @@ async def cancel_handler(client: Client, message: Message):
     if user_id in user_sessions:
         del user_sessions[user_id]
     logger.info(f"Session cleared for user {user_id}.")
-    await message.reply_text("🗑️ **Queue cleared.** Send files or type /start to begin again.")
+    await message.reply_text("🗑️ Queue cleared. Send files or type /start to begin again.", parse_mode=ParseMode.DISABLED)
 
 
 # ----------------- FILE HANDLER (ZERO SPAM) -----------------
@@ -276,7 +269,6 @@ async def file_collector(client: Client, message: Message):
     if session["state"] == "WAITING_TEXT":
         session["state"] = "COLLECTING"
 
-    # Silently queue files without spamming replies
     session["files"].append(message)
     logger.info(f"User {user_id} queued file #{len(session['files'])}")
 
@@ -288,20 +280,19 @@ async def custom_text_processor(client: Client, message: Message):
     session = user_sessions.get(user_id)
 
     if not session or session.get("state") != "WAITING_TEXT":
-        await message.reply_text("ℹ️ Forward your files first, then click /done when finished.")
+        await message.reply_text("ℹ️ Forward your files first, then click /done when finished.", parse_mode=ParseMode.DISABLED)
         return
 
     user_append_text = message.text.strip()
     files_to_process = session.get("files", [])
     total = len(files_to_process)
 
-    status_msg = await message.reply_text(f"⚡ **Processing and delivering {total} file(s)...**")
+    status_msg = await message.reply_text(f"⚡ Processing and delivering {total} file(s)...", parse_mode=ParseMode.DISABLED)
     logger.info(f"Delivering {total} files for user {user_id}...")
 
     success_count = 0
     for idx, file_msg in enumerate(files_to_process, start=1):
         try:
-            # Cleans prefixes from original caption
             original_caption = clean_text(file_msg.caption or "")
 
             caption_parts = []
@@ -312,7 +303,7 @@ async def custom_text_processor(client: Client, message: Message):
 
             final_caption = "\n\n".join(caption_parts)
 
-            # Direct server copy (0 download)
+            # Direct server-to-server zero download copy
             await file_msg.copy(
                 chat_id=message.chat.id,
                 caption=final_caption
@@ -325,15 +316,15 @@ async def custom_text_processor(client: Client, message: Message):
     del user_sessions[user_id]
 
     await status_msg.edit_text(
-        f"🎉 **Complete! Successfully sent {success_count}/{total} file(s).**\n\n"
-        "Send /start anytime to process another batch."
+        f"🎉 Complete! Successfully delivered {success_count}/{total} file(s).\n\n"
+        "Forward more files anytime and click /done.",
+        parse_mode=ParseMode.DISABLED
     )
     logger.info(f"Completed batch delivery of {success_count} files for user {user_id}.")
 
 
 # ----------------- STARTUP & KEEP-ALIVE -----------------
 async def main():
-    # Start web server thread for Render 24/7 health check
     keep_alive()
     logger.info("🌐 Flask Web Server started.")
 
@@ -343,7 +334,6 @@ async def main():
     logger.info("⚡ Zero-download instant forward mode active.")
     logger.info("==========================================")
 
-    # Set Telegram 3-line Menu Button
     await app.set_bot_commands([
         BotCommand("start", "Start session & send files"),
         BotCommand("done", "Finish files & set message"),

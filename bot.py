@@ -1,8 +1,6 @@
 import os
 import re
 import logging
-from threading import Thread
-from flask import Flask
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, BotCommand
 from pyrogram.enums import ParseMode
@@ -13,21 +11,6 @@ logging.basicConfig(
     format="[%(asctime)s - %(levelname)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# ----------------- FLASK WEB SERVER FOR RENDER -----------------
-web_app = Flask(__name__)
-
-@web_app.route('/')
-def home():
-    return "Bot is running healthy & live 24/7!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    web_app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    t = Thread(target=run_web, daemon=True)
-    t.start()
 
 # ----------------- CONFIGURATION -----------------
 API_ID = int(os.environ.get("API_ID", "0"))
@@ -342,11 +325,8 @@ async def custom_text_processor(client: Client, message: Message):
     logger.info(f"Completed batch delivery of {success_count} files for user {user_id}.")
 
 
-# ----------------- STARTUP & KEEP-ALIVE -----------------
+# ----------------- STARTUP & LIFECYCLE -----------------
 async def main():
-    keep_alive()
-    logger.info("🌐 Flask Web Server started.")
-
     await app.start()
     logger.info("==========================================")
     logger.info("🤖 Auto Caption Editor Bot is ONLINE & RUNNING!")
